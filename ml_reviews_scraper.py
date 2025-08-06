@@ -1,37 +1,54 @@
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError, ViewportSize
 import json
+
 
 def scrape_reviews(product_url, max_reviews=25):
     data = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            viewport=ViewportSize(width=1920, height=1080)
+        )
+        page = context.new_page()
+
         page.goto(product_url, timeout=60000)
 
-        # Clica no botão para abrir o modal
         print("[→] Procurando botão 'Mostrar todas as opiniões'...")
-        show_more_btn = page.locator('button.show-more-click')
-        show_more_btn.click()
-        print("[✓] Botão clicado, aguardando modal...")
 
-        # Aguarda o modal com artigos aparecer
-        page.wait_for_selector('article[data-testid="comment-component"]', timeout=15000)
-
-        # Localiza o contêiner do modal
-        modal_container = page.locator('div[role="dialog"]')
-        if not modal_container:
-            print("[✘] Modal não encontrado.")
+        try:
+            show_more_selector = 'button[data-testid="see-more"]'
+            page.wait_for_selector(show_more_selector, state="visible", timeout=10000)
+            page.wait_for_timeout(1000)  # espera 1 segundo extra para estabilizar, SE TIRAR ISSO AQUI F TOTAL NO CHAT
+            page.locator(show_more_selector).click(force=True)
+            print("[✓] Botão de avaliações clicado.")
+        except Exception as e:
+            print(f"[✘] Erro ao clicar no botão de avaliações: {e}")
+            browser.close()
             return
 
-        print("[→] Scrollando dentro do modal...")
+        try:
+            print("[→] Aguardando iframe de avaliações carregar...")
+            iframe_selector = 'iframe[data-testid="ui-pdp-iframe-reviews"]'
+            page.wait_for_selector(iframe_selector, timeout=15000)
+            reviews_frame = page.frame_locator(iframe_selector)
+            print("[✓] Iframe carregado.")
+
+            reviews_frame.locator('article[data-testid="comment-component"]').first.wait_for(timeout=10000)
+            print("[✓] Seção de avaliações carregada dentro do iframe.")
+
+        except TimeoutError:
+            print("[✘] O iframe ou a seção de avaliações não carregou após o clique.")
+            browser.close()
+            return
+
+        print("[→] Scrollando dentro do iframe para carregar avaliações...")
         prev_count = 0
         attempts = 0
 
-        # Loop até pegar o máximo ou não carregar mais nada
         while True:
-            # Conta quantos artigos carregaram até agora
-            articles = modal_container.locator('article[data-testid="comment-component"]')
+            articles = reviews_frame.locator('article[data-testid="comment-component"]')
             count = articles.count()
 
             print(f"[...] {count} avaliações carregadas até agora.")
@@ -48,28 +65,32 @@ def scrape_reviews(product_url, max_reviews=25):
                 print("[✓] Nenhuma nova avaliação carregando. Encerrando scroll.")
                 break
 
-            # Scrolla dentro do modal
-            modal_container.evaluate("(el) => el.scrollBy(0, el.scrollHeight)")
-            page.wait_for_timeout(1500)
+            articles.nth(-1).scroll_into_view_if_needed()
+            page.wait_for_timeout(2000)
             prev_count = count
 
         print("[→] Extraindo avaliações...")
-        for i in range(min(count, max_reviews)):
-            article = articles.nth(i)
-            text = article.locator('p.ui-review-capability-comments__comment__content').inner_text().strip()
-            if text:
-                data.append({
-                    "review_text": text,
-                    "source": "Mercado Livre"
-                })
+        final_articles = reviews_frame.locator('article[data-testid="comment-component"]')
+        for i in range(min(final_articles.count(), max_reviews)):
+            article = final_articles.nth(i)
+            text_element = article.locator('p.ui-review-capability-comments__comment__content')
+            if text_element.count() > 0:
+                text = text_element.inner_text().strip()
+                if text:
+                    data.append({
+                        "review_text": text,
+                        "source": "Mercado Livre"
+                    })
 
         browser.close()
 
-    # Salva em JSON
+
     with open("ml_reviews.json", "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     print(f"[✓] {len(data)} avaliações salvas no arquivo ml_reviews.json")
 
+
 if __name__ == "__main__":
-    scrape_reviews("https://www.mercadolivre.com.br/aparador-de-grama-tramontina-ap1500t-com-dimetro-de-corte-280mm-1500w-laranjapreto/p/MLB9086770")
+    scrape_reviews(
+        "https://www.mercadolivre.com.br/aparador-de-grama-tramontina-ap1500t-com-dimetro-de-corte-280mm-1500w-laranjapreto/p/MLB9086770")
